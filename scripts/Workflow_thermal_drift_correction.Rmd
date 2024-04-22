@@ -1,0 +1,313 @@
+---
+title: "Workflow: Themal drift Correction (Camera: Wiris Pro Sc)"
+author: "Laura Giese "
+date: "Oktober 2023"
+output:
+  rmarkdown::html_document:
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+## Material
+
+- software you need: UAV-Rechner: AgiSoft Metashape, QGIS ; your computer: R, gdal, exiftool, QGIS
+- Link to working directory UAV-Rechner (Windows): 'D:\FelixW\' 
+- Link to Sciebo: https://uni-muenster.sciebo.de/apps/files/?dir=/thermal_correction&fileid=3274253449
+- Web-Link to AgiSoft Pre-Processing HowTo: https://www.drone-thermal-camera.com/user-manual-agisoft/
+
+## Concept
+
+*OVERVIEW - all steps:*  
+
+1. run full AgiSoft Pre-Processing Wiris Workflow 
+2. georeference the orthorectified thermal image
+3. compare ground truth data with processed orthomosaic in R (point shape attribute: 'flir' in sciebo folder & thermal images in folder 'D:\FelixW\ps_au_2023_08_13\flight2\' on UAV Rechner)
+4. export footprint polygon shapes using .py script in your AgiSoft Metashape Project 
+5. run R correction script - solve problem with incorrect georeferencing of single images
+6. repeat steps 1-3 with corrected images
+
+## AgiSoft Pre-Processing
+
+- Im Raum, den ich dir gezeigt habe, kannst du den Super-Rechner nutzen (rechts, fenster)
+- Ich habe dir die Thermal-Einzelbilder unter 'D:\FelixW\' abgelegt, kannst du als Arbeitsordner nutzen
+- nur 'flight2' bearbeiten
+- folge der Anleitung:  https://www.drone-thermal-camera.com/user-manual-agisoft/ 
+- vorsicht bei Export Orthomosaic = letzter Schritt: choose 'index value' instead of 'index color'
+
+## Georeferencing QGIS
+
+- nutze das Georeferencing tool in QGIS zur manuellen georeferenzierung
+- ich habe dir dafür in deinem Ordner auf dem UAV-Rechner schon ein QGIS Projekt angelegt 
+- es enthält ein multispektrales Orthophoto, auf der du nach Referenzpunkten sichen kannst
+- außerdem enthält die Datei thermal_flight.gpkg ein Polygon der boflogenen Fläche, allerdings 
+  mussten Einzelbilder im Osten (die ersten Reihen der Befliegung) aufgrund schlechter Qualität 
+  aussortiert werden (das Polygon gibt also nur teilweise die Eckpunktkoordinaten des Orthomosaics an)
+- wenn du das noch nie gemacht hast, suche dir ein Tutorial im Internet
+
+## Compare Orthomosaic with ground truth data
+
+- Nutze hierfür R & QGis
+- die ground truth daten habe ich dir in einem Ordner auf Sciebo zu Verfügung gestellt (flight2_noon.gpkg )
+- plotte die daten (punkt shapes + raster) in einem gemeinsamen plot
+- versuche zu erfassen ob es räumlich einen zusammenhang gibt (correlation, scatterplot)
+- nutze die FLIR fotos im Ordner flir auf dem UAV-Rechner um dir ein grobes Bild von den ground truth (nur angucken, keine R analyse o.ä.)
+  werten zu machen (starke Temperaturschwankungen während der Messung!!!)
+- berechne die Temperaturdifferenz auf dem schwarz-weißen Calibrations-panel (zwischen rasterdaten und ground truth)
+
+## export polygon shapes
+
+- open your AgiSoft project
+- click Tools - <> Run Script
+- navigate to 'D:\FelixW\ps_au_2023_08_13\AgiSoft\img_footprint.py'
+- click Ok
+- a new tab 'scripts' should appear in the tool bar
+- click scripts - create footprint shape layer
+- in your chunk on the left side a folder with polygons (shapes) should appear
+- right click on the folder & export
+
+## run R correction script - solve problem with incorrect georeferencing of single images
+
+```{r}
+#load packages
+library(terra)
+library(sf)
+library(ggplot2)
+library(tidyterra)
+
+```
+
+
+```{r, eval = F, echo = T}
+#read radiometric tiffs
+#change path to overall R working directory
+path_main='/home/laurag/Arbeit/wwu/data/UAV/thermal/puergschachen_23_08_13/wiris/flight2/'
+
+#/home/laurag/Arbeit/wwu/UAV_shared_dir/zoo_23_06_13/3rd_flight/
+#read shape polygons
+footprint_shapes_z=st_read(paste0(path_main,'footprint_shapes_cleaned.shp'))
+tiff_list=footprint_shapes_z$NAME[order(footprint_shapes_z$NAME)]
+#order after filename
+footprint_shapes_z_order=footprint_shapes_z[order(footprint_shapes_z$NAME),]
+```
+```{r, eval = F, echo = T}
+#if temperature difference at calibration panel: one point offset calibration ~ from 8 to 21.4 = add 13.4 in the end of flight
+#add temperature difference to image at start of the correction workflow
+
+#keep in mind: in this step you are calling 'exiftool' command line tool from R see 'system()' - function),
+# so make sure it is installed and that the path works for your computer system (code works for linux)
+
+#initial difference
+mean_diff_L_init=-3.5   #13.4
+
+#read initial image
+r_orig_init=rast(paste0(path_main,'input_raw/', tiff_list[[1]], '.tiff'))
+#convert raster values of initial image to temperature
+tt_init=(r_orig_init/40)-100
+#add temperature difference to initial raster values (dn format)
+tt_corr_init=tt_init+mean_diff_L_init
+#round values and convert back to digital numbers
+tt_corr_init_dn=round((tt_corr_init+100)*40, digits = 0)
+values(tt_corr_init_dn)=as.integer(values(tt_corr_init_dn))
+#set projection
+crs(tt_corr_init_dn)="+init=epsg:4326"
+#set extent (image resolution, not real geographical extent)
+ext(tt_corr_init_dn)=c(0,640,-512,0)
+#write corrected image to file
+terra::writeRaster(tt_corr_init_dn, paste0(path_main, 'out_raw_corrected_mean/', 'meancorr', '_', tiff_list[[1]],'.tiff'), datatype = 'INT2U', gdal=c("COMPRESS=DEFLATE", "TFW=YES"), NAflag=-100)
+#add intial meta data to file
+system(paste0('exiftool -TagsFromFile ', path_main, 'input_raw/', tiff_list[[1]], '.tiff', ' "-all:all>all:all" ',path_main ,'out_raw_corrected_mean/', 'meancorr', '_', tiff_list[[1]], '.tiff'))
+```
+
+```{r, eval = F, echo = T}
+### ------------------------------------------------------------------------------------------------------------ ###
+# iterate over all images  consequtively and adjust values to the first already corrected image
+#- define overlapping area of to consequtive images based on shapes
+#- calculate difference between means of overlapping area
+#- uptade image difference variable
+#- substract difference from whole second image of image pair
+
+#keep in mind: in this step you are calling 'exiftool' and 'gdal' via command line from R (see 'system()' - function),
+#so make sure everything is installed and that the path works for your computer system (code works for linux)
+#try to test in commandline
+### ------------------------------------------------------------------------------------------------------------ ###
+
+##tt_mean_init=mean(getValues(tt_corr_init),na.rm=T)
+L=2 # itaration variable for testing
+
+#initial difference
+mean_diff_L_ol=mean_diff_L_init
+#path of all original images
+path_in=paste0(path_main,'input_raw/')
+#path of all corrected images (output)
+path_corrected=paste0(path_main, 'out_raw_corrected_mean/')
+#tiff_list=list.files(path_in)
+
+#itareate over list of images
+lapply(seq(2,(length(tiff_list))), function(L){
+  #print start mdifference of means
+  print(paste0('start mdL= ', mean_diff_L_ol))
+  #read initial image 
+  r_ref=rast(paste0(path_in, tiff_list[[L-1]], '.tiff'))
+
+  #get overlapping pixel rows
+  
+  #remove z variable from shapes to move them to one hight layer
+  footprint_shapes=st_zm(footprint_shapes_z_order)
+  #read image outline polygon of inital image
+  foot_x=st_geometry(footprint_shapes[L-1,])
+  #get coordinates of corner points
+  poly_px=as.data.frame(rbind(st_coordinates(foot_x)[,1:2]))
+
+  #use gdal to georeference image (assign 1st, 2nd, 3rd, 4th coordinate to image corner)
+  #TO DO: check precisely: still correct for polygons with more than 4 coordinates??
+
+  if(L==2){
+   system(paste0('gdal_translate \ -gcp 640 0 ', poly_px$X[2], ' ', poly_px$Y[2], ' \ -gcp 0 0 ', poly_px$X[1], ' ', poly_px$Y[1], ' \ -gcp 0 512 ', poly_px$X[4], ' ', poly_px$Y[4], 
+  ' \ -gcp 640 512 ', poly_px$X[3], ' ', poly_px$Y[3], ' \ -of GTiff \ ', path_in, tiff_list[[L-1]], '.tiff \ ', path_in ,'gref3/',tiff_list[[L-1]], '_gref.tiff'))
+  }
+  #read georeferenced image (= reference image for correction)
+  #r_ref_gref=rast(paste0(path_in, 'gref/', tiff_list[[L-1]], '_gref.tiff'))
+  r_ref_gref=rast(paste0(path_in, 'gref3/', tiff_list[[L-1]], '_gref.tiff'))
+  
+  #remove image rotation
+  r_ref_rect=rectify(r_ref_gref)
+  
+
+  ##summary(r_ref_rect)
+  #convert pixel values to Temperature
+  tr_ref=(r_ref_rect/40)-100
+  #TO DO: convert image difference to dn format
+
+  #add initial difference (or from previous iteration) 
+#  tr_ref_corr=tr_ref+mean_diff_L_ol
+  tr_ref_corr=tr_ref+mean_diff_L_ol
+
+  
+  #convert coordinates to point spatial objects
+  comnb_coords_x = poly_px %>%
+            st_as_sf(coords = c("X", "Y"), crs = 4326) %>%
+            st_cast('POINT') 
+
+  
+  #image 2 adjust
+  #read original uncorrected image (second image of image pair)
+  r_orig=rast(paste0(path_in, tiff_list[[L]], '.tiff'))
+  #get coordinates of image outline polygon (= here: named footprint)
+  foot_y=st_geometry(footprint_shapes[L,])
+  poly_py=as.data.frame(rbind(st_coordinates(foot_y)[,1:2]))
+  #use gdal to georeference image (assign 1st, 2nd, 3rd, 4th coordinate to image corner)
+  system(paste0('gdal_translate \ -gcp 640 0 ', poly_px$X[2], ' ', poly_px$Y[2], ' \ -gcp 0 0 ', poly_px$X[1], ' ', poly_px$Y[1], ' \ -gcp 0 512 ', poly_px$X[4], ' ', poly_px$Y[4], 
+  ' \ -gcp 640 512 ', poly_px$X[3], ' ', poly_px$Y[3], ' \ -of GTiff \ ', path_in, tiff_list[[L]], '.tiff \ ', path_in ,'gref3/',tiff_list[[L]], '_gref.tiff'))
+  # read georeferenced image
+  r_orig_gref=rast(paste0(path_in, 'gref3/', tiff_list[[L]], '_gref.tiff'))
+  #remove rotation 
+  r_orig_rect=rectify(r_orig_gref)
+  
+
+  ##summary(r_orig_rect)
+  #convert pixel values to Temperature
+  tr_orig=(r_orig_rect/40)-100
+  tr_orig_nonrect=(r_orig/40)-100
+  ##tr_orig_corr=tr_orig+mean_diff_L_ol
+
+  #convert corner points to point spatial object
+  comnb_coords_y = poly_py %>%
+            st_as_sf(coords = c("X", "Y"), crs = 4326) %>%
+            st_cast('POINT') 
+  #set projection
+  crs(tr_orig)="+init=epsg:4326"
+
+
+  #get overlap of image pair
+  x_and_y = st_intersection(footprint_shapes[L-1,], footprint_shapes[L,])
+  ##as.data.frame(rbind(st_coordinates(foot_x)[,1:2]))
+
+  #mask reference image to overlapping area
+  ref_masked=mask(tr_ref_corr,x_and_y)
+  ref_masked_mean=mean(values(ref_masked), na.rm = T)
+
+  #mask uncorrected image to overlapping area
+  orig_masked=mask(tr_orig,x_and_y)
+  
+  orig_masked_mean=mean(values(orig_masked), na.rm = T)
+
+  #plot for visualization
+  #ggplot()+
+  #geom_spatraster(data=ref_masked) +
+  #geom_spatraster(data=orig_masked) +
+  #geom_sf(data=x_and_y,col = "black")
+
+  #update mean difference variable
+  mean_diff_previous=mean_diff_L_ol #initial temperature difference (1 point offset correction) or difference of previous iteration
+  mean_diff_L_ol=orig_masked_mean-ref_masked_mean #add new temperature difference
+  #error handling
+  if(isTRUE(mean_diff_L_ol=='NaN')){
+    mean_diff_L_ol<-mean_diff_previous
+  }
+  ##mean_diff_L_ol=1.5   # some test value
+  #convert pixel values of uncorrected image to temperature
+  #tr_orig=(r_orig/40)-100
+  #substract (positive or negative) updated mean difference variable
+  tr_orig_corr=tr_orig-mean_diff_L_ol
+  tr_orig_corr_nonrect=tr_orig_nonrect-mean_diff_L_ol
+  
+
+  #convert pixel values to digital number
+  tr_corr_dn=round((tr_orig_corr+100)*40, digits = 0)
+  tr_corr_dn_nonrect=round((tr_orig_corr_nonrect+100)*40, digits = 0)
+
+
+  values(tr_corr_dn)=as.integer(values(tr_corr_dn))
+  values(tr_corr_dn_nonrect)=as.integer(values(tr_corr_dn_nonrect))
+
+
+  #set projection to WGS 84
+  crs(tr_corr_dn)="+init=epsg:4326"
+  crs(tr_corr_dn_nonrect)="+init=epsg:4326"
+
+
+  #set extent to image resolution (not real geographic extent)
+  ext(tr_corr_dn)=c(0,640,-512,0)
+  ext(tr_corr_dn_nonrect)=c(0,640,-512,0)
+
+
+  #plot(tr_corr_dn)
+  #write corrected image
+  terra::writeRaster(tr_corr_dn_nonrect, paste0(path_corrected, 'meancorr', '_', tiff_list[[L]], '.tiff'), datatype = 'INT2U', gdal=c("COMPRESS=DEFLATE", "TFW=YES"), NAflag=-100)
+  system(paste0('exiftool -TagsFromFile ',path_in, tiff_list[[L]], '.tiff', ' "-all:all>all:all" ', path_corrected, 'meancorr', '_', tiff_list[[L]], '.tiff')) 
+  print(paste0(L,' corrected meandiff=', mean_diff_L_ol))
+  #update mean difference variable to use in next iteration
+  mean_diff_L_ol <<- -mean_diff_L_ol
+  }
+)
+```
+
+```{r, eval = F, echo = T}
+
+##additional code, some testing
+#check if correction worked by calculating mean per image, see if values make sense (small variance)
+
+#calculate means of single images afterwards
+corrected_list=list.files('/home/laurag/Arbeit/wwu/UAV_shared_dir/amtsvenn_22_07_26/av_22-07-26_09-47_early_small_corrected/')
+
+out_mean_raw=lapply(corrected_list, function(L){
+  rt=raster(paste0('/home/laurag/Arbeit/wwu/UAV_shared_dir/amtsvenn_22_07_26/av_22-07-26_09-47_early_small_corrected/', L))
+  tt=(rt/40)-100
+  tt_mean=mean(getValues(tt),na.rm=T)
+  time_tt=paste0("2022-07-13 ",substr(L,1, nchar(L)-21))
+  mean_out=c(time_tt,tt_mean)
+  return(mean_out)
+})
+#
+mean_raw_tab=do.call(rbind,out_mean_raw)
+mean_raw_tab_df=as.data.frame(mean_raw_tab)
+mean_raw_tab_df[,2]=as.numeric(mean_raw_tab_df[,2])
+mean_raw_tab_df[,1]=as.POSIXct(mean_raw_tab_df[,1],format="%Y-%m-%d %H-%M-%S", origin = "1970-01-01 00:00:00")
+
+colnames(mean_raw_tab_df)=c('timestamp','temp_surf')
+#mean_raw_tab_df[,1]=ymd_hms(mean_raw_tab_df[,1])
+plot(mean_raw_tab_df[,2], type= 'l', col = 'green')
+lines(cbind(mean_raw_tab_df$timestamp,predict(loess(mean_raw_tab_df$temp_surf~seq(nrow(mean_raw_tab_df)), data=mean_raw_tab_df))))
+
+```
